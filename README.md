@@ -86,7 +86,7 @@ Bearer keys; в Kitchen DB хранится только SHA-256 Partner key.
 
 ## Идемпотентность и надёжность
 
-![Order sequence](docs/diagrams/generated/order-sequence.svg)
+![Order sequence](docs/diagrams/generated/order-sequence-modern.png)
 
 - Заказ, snapshots, история и outbox коммитятся в одной транзакции.
 - Worker-ы конкурируют через `FOR UPDATE SKIP LOCKED`; HTTP не держит DB-транзакцию.
