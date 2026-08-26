@@ -1,0 +1,8 @@
+package: restaurantapi
+output: restaurantapi/openapi.gen.go
+generate:
+  models: true
+  client: true
+  chi-server: true
+output-options:
+  skip-prune: false

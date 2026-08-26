@@ -1,0 +1,548 @@
+openapi: 3.1.0
+info:
+  title: Demo-ресторан Integration API
+  version: 0.1.0
+  description: |
+    API отдельного demo-заведения. Платформа доставляет заказ как минимум один раз,
+    а ресторан идемпотентно сохраняет решение по `platform_order_id` и никогда не
+    резервирует остаток повторно.
+servers:
+  - url: http://localhost:8081
+    description: Локальный Docker Compose
+tags:
+  - name: Operations
+    description: Проверки процесса и его зависимостей.
+  - name: Incoming orders
+    description: Входящие заказы платформы.
+
+paths:
+  /healthz:
+    get:
+      tags: [Operations]
+      operationId: getRestaurantHealth
+      summary: Проверить, что процесс работает
+      security: []
+      responses:
+        '200':
+          description: Процесс работает.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: ok
+
+  /readyz:
+    get:
+      tags: [Operations]
+      operationId: getRestaurantReadiness
+      summary: Проверить готовность принимать заказы
+      description: Проверяет доступность `restaurant-postgres`.
+      security: []
+      responses:
+        '200':
+          description: Demo-ресторан и его PostgreSQL готовы.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: ready
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /integration/v1/orders:
+    post:
+      tags: [Incoming orders]
+      operationId: receivePlatformOrder
+      summary: Получить и решить заказ платформы
+      description: |
+        Для нового `platform_order_id` ресторан в одной транзакции блокирует нужные
+        товары в стабильном порядке, проверяет фактический остаток и либо резервирует
+        все позиции, либо не резервирует ничего. Недостаток остатка — успешная обработка
+        с решением `rejected`, а не HTTP-ошибка.
+
+        Первый приём возвращает `201`. Повтор идентичного payload возвращает сохранённое
+        решение с `200`. Тот же `platform_order_id` с другим payload возвращает
+        `409 PLATFORM_ORDER_ID_REUSED`.
+      security:
+        - IntegrationBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IncomingOrderRequest'
+            examples:
+              default:
+                $ref: '#/components/examples/IncomingOrderRequest'
+      responses:
+        '201':
+          description: Входящий заказ и устойчивое решение созданы.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+            Location:
+              description: URI входящего заказа.
+              schema:
+                type: string
+                example: /integration/v1/orders/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
+            Idempotency-Replayed:
+              description: Всегда `false` для впервые полученного заказа.
+              schema:
+                type: boolean
+                example: false
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IncomingOrder'
+              examples:
+                accepted:
+                  $ref: '#/components/examples/AcceptedIncomingOrder'
+                rejected:
+                  $ref: '#/components/examples/RejectedIncomingOrder'
+        '200':
+          description: Идемпотентный повтор; возвращено ранее сохранённое решение.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+            Idempotency-Replayed:
+              description: Всегда `true` для повтора.
+              schema:
+                type: boolean
+                example: true
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IncomingOrder'
+              examples:
+                accepted:
+                  $ref: '#/components/examples/AcceptedIncomingOrder'
+                rejected:
+                  $ref: '#/components/examples/RejectedIncomingOrder'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: "`platform_order_id` повторно использован с другим payload."
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                reused:
+                  $ref: '#/components/examples/PlatformOrderIDReusedError'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /integration/v1/orders/{platformOrderId}:
+    get:
+      tags: [Incoming orders]
+      operationId: getPlatformOrder
+      summary: Получить сохранённое решение по заказу платформы
+      description: Используется для диагностики и восстановления после потерянного ответа.
+      security:
+        - IntegrationBearer: []
+      parameters:
+        - $ref: '#/components/parameters/PlatformOrderID'
+      responses:
+        '200':
+          description: Входящий заказ и сохранённое решение.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IncomingOrder'
+              examples:
+                accepted:
+                  $ref: '#/components/examples/AcceptedIncomingOrder'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    IntegrationBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: Integration API key
+      description: Секрет между worker и demo-рестораном задаётся через environment variables.
+
+  headers:
+    XRequestID:
+      description: Идентификатор запроса, также присутствующий в теле ошибки.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        example: req-01J9XYZ7E7T1R6M4B8N3P2Q5S6
+
+  parameters:
+    PlatformOrderID:
+      name: platformOrderId
+      in: path
+      required: true
+      description: Внутренний UUID заказа основной платформы.
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    BadRequest:
+      description: Запрос не прошёл синтаксическую или структурную валидацию.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: VALIDATION_ERROR
+            message: Итог заказа не равен сумме позиций.
+            details:
+              field: total_price_minor
+            request_id: req-01J9XYZ7E7T1R6M4B8N3P2Q5S6
+    Unauthorized:
+      description: Integration API key отсутствует или не прошёл проверку.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: UNAUTHORIZED
+            message: Неверный Integration API key.
+            request_id: req-01J9XYZ7E7T1R6M4B8N3P2Q5S6
+    NotFound:
+      description: Заказ с таким `platform_order_id` не найден.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: NOT_FOUND
+            message: Входящий заказ не найден.
+            request_id: req-01J9XYZ7E7T1R6M4B8N3P2Q5S6
+    PayloadTooLarge:
+      description: Размер JSON-тела превышает серверный лимит.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: VALIDATION_ERROR
+            message: Тело запроса слишком большое.
+            request_id: req-01J9XYZ7E7T1R6M4B8N3P2Q5S6
+    InternalError:
+      description: Неожиданная внутренняя ошибка без раскрытия деталей реализации.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: INTERNAL_ERROR
+            message: Внутренняя ошибка сервиса.
+            request_id: req-01J9XYZ7E7T1R6M4B8N3P2Q5S6
+    ServiceUnavailable:
+      description: "`restaurant-postgres` временно не готова."
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: SERVICE_UNAVAILABLE
+            message: PostgreSQL временно недоступна.
+            request_id: req-01J9XYZ7E7T1R6M4B8N3P2Q5S6
+
+  schemas:
+    Currency:
+      type: string
+      enum: [RUB]
+
+    IncomingOrderStatus:
+      type: string
+      enum: [accepted, rejected]
+
+    RejectionCode:
+      type: string
+      enum: [ITEM_UNAVAILABLE]
+
+    ErrorCode:
+      type: string
+      enum:
+        - PLATFORM_ORDER_ID_REUSED
+        - VALIDATION_ERROR
+        - UNAUTHORIZED
+        - NOT_FOUND
+        - SERVICE_UNAVAILABLE
+        - INTERNAL_ERROR
+
+    Error:
+      type: object
+      additionalProperties: false
+      required: [code, message, request_id]
+      properties:
+        code:
+          $ref: '#/components/schemas/ErrorCode'
+        message:
+          type: string
+          minLength: 1
+          maxLength: 512
+        details:
+          type: object
+          additionalProperties: true
+        request_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+
+    HealthResponse:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, ready]
+
+    IncomingOrderItem:
+      type: object
+      additionalProperties: false
+      required:
+        - platform_menu_item_id
+        - external_item_id
+        - name
+        - unit_price_minor
+        - quantity
+        - line_total_minor
+        - currency
+      properties:
+        platform_menu_item_id:
+          type: string
+          format: uuid
+        external_item_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        unit_price_minor:
+          type: integer
+          format: int64
+          minimum: 1
+        quantity:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 100
+        line_total_minor:
+          type: integer
+          format: int64
+          minimum: 1
+        currency:
+          $ref: '#/components/schemas/Currency'
+
+    IncomingOrderRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - platform_order_id
+        - platform_restaurant_id
+        - total_price_minor
+        - currency
+        - items
+        - created_at
+      properties:
+        platform_order_id:
+          type: string
+          format: uuid
+        platform_restaurant_id:
+          type: string
+          format: uuid
+        total_price_minor:
+          type: integer
+          format: int64
+          minimum: 1
+        currency:
+          $ref: '#/components/schemas/Currency'
+        items:
+          type: array
+          minItems: 1
+          maxItems: 100
+          description: |
+            `external_item_id` и `platform_menu_item_id` не должны повторяться;
+            порядок позиций не влияет на идемпотентный payload hash.
+          items:
+            $ref: '#/components/schemas/IncomingOrderItem'
+        created_at:
+          type: string
+          format: date-time
+
+    Rejection:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code:
+          $ref: '#/components/schemas/RejectionCode'
+        message:
+          type: string
+          minLength: 1
+          maxLength: 500
+        external_item_ids:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 128
+
+    IncomingOrder:
+      type: object
+      additionalProperties: false
+      required:
+        - platform_order_id
+        - status
+        - total_price_minor
+        - currency
+        - items
+        - received_at
+        - decided_at
+      properties:
+        platform_order_id:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/IncomingOrderStatus'
+        total_price_minor:
+          type: integer
+          format: int64
+          minimum: 1
+        currency:
+          $ref: '#/components/schemas/Currency'
+        items:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/IncomingOrderItem'
+        rejection:
+          description: Присутствует для `rejected` и отсутствует для `accepted`.
+          $ref: '#/components/schemas/Rejection'
+        received_at:
+          type: string
+          format: date-time
+        decided_at:
+          type: string
+          format: date-time
+
+  examples:
+    IncomingOrderRequest:
+      value:
+        platform_order_id: aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
+        platform_restaurant_id: 11111111-1111-4111-8111-111111111111
+        total_price_minor: 3490
+        currency: RUB
+        items:
+          - platform_menu_item_id: 22222222-2222-4222-8222-222222222222
+            external_item_id: soup-01
+            name: Томатный суп
+            unit_price_minor: 1250
+            quantity: 2
+            line_total_minor: 2500
+            currency: RUB
+          - platform_menu_item_id: 33333333-3333-4333-8333-333333333333
+            external_item_id: bun-01
+            name: Булочка
+            unit_price_minor: 990
+            quantity: 1
+            line_total_minor: 990
+            currency: RUB
+        created_at: '2026-08-26T10:15:00Z'
+
+    AcceptedIncomingOrder:
+      value:
+        platform_order_id: aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
+        status: accepted
+        total_price_minor: 3490
+        currency: RUB
+        items:
+          - platform_menu_item_id: 22222222-2222-4222-8222-222222222222
+            external_item_id: soup-01
+            name: Томатный суп
+            unit_price_minor: 1250
+            quantity: 2
+            line_total_minor: 2500
+            currency: RUB
+          - platform_menu_item_id: 33333333-3333-4333-8333-333333333333
+            external_item_id: bun-01
+            name: Булочка
+            unit_price_minor: 990
+            quantity: 1
+            line_total_minor: 990
+            currency: RUB
+        received_at: '2026-08-26T10:15:01Z'
+        decided_at: '2026-08-26T10:15:01Z'
+
+    RejectedIncomingOrder:
+      value:
+        platform_order_id: bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb
+        status: rejected
+        total_price_minor: 2500
+        currency: RUB
+        items:
+          - platform_menu_item_id: 22222222-2222-4222-8222-222222222222
+            external_item_id: soup-01
+            name: Томатный суп
+            unit_price_minor: 1250
+            quantity: 2
+            line_total_minor: 2500
+            currency: RUB
+        rejection:
+          code: ITEM_UNAVAILABLE
+          message: Недостаточно остатка для всех позиций.
+          external_item_ids: [soup-01]
+        received_at: '2026-08-26T10:16:01Z'
+        decided_at: '2026-08-26T10:16:01Z'
+
+    PlatformOrderIDReusedError:
+      value:
+        code: PLATFORM_ORDER_ID_REUSED
+        message: platform_order_id уже связан с другим payload.
+        request_id: req-01J9XYZ7E7T1R6M4B8N3P2Q5S6

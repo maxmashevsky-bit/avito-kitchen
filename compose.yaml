@@ -1,0 +1,114 @@
+name: avito-kitchen
+
+x-common-environment: &common-environment
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  HTTP_MAX_BODY_BYTES: ${HTTP_MAX_BODY_BYTES:-1048576}
+  HTTP_READ_TIMEOUT: ${HTTP_READ_TIMEOUT:-5s}
+  HTTP_WRITE_TIMEOUT: ${HTTP_WRITE_TIMEOUT:-10s}
+  HTTP_IDLE_TIMEOUT: ${HTTP_IDLE_TIMEOUT:-60s}
+  HTTP_SHUTDOWN_TIMEOUT: ${HTTP_SHUTDOWN_TIMEOUT:-10s}
+  INTEGRATION_API_KEY: ${INTEGRATION_API_KEY:-demo-integration-key-change-me}
+
+services:
+  kitchen-postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: kitchen
+      POSTGRES_USER: kitchen
+      POSTGRES_PASSWORD: kitchen
+    volumes:
+      - kitchen-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kitchen -d kitchen"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  restaurant-postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: restaurant
+      POSTGRES_USER: restaurant
+      POSTGRES_PASSWORD: restaurant
+    volumes:
+      - restaurant-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U restaurant -d restaurant"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  kitchen-migrate:
+    build: .
+    command: ["goose", "-dir", "/app/migrations/kitchen", "postgres", "postgres://kitchen:kitchen@kitchen-postgres:5432/kitchen?sslmode=disable", "up"]
+    depends_on:
+      kitchen-postgres:
+        condition: service_healthy
+    restart: "no"
+
+  restaurant-migrate:
+    build: .
+    command: ["goose", "-dir", "/app/migrations/restaurant", "postgres", "postgres://restaurant:restaurant@restaurant-postgres:5432/restaurant?sslmode=disable", "up"]
+    depends_on:
+      restaurant-postgres:
+        condition: service_healthy
+    restart: "no"
+
+  kitchen-api:
+    build: .
+    command: ["kitchen-api"]
+    environment:
+      <<: *common-environment
+      KITCHEN_DATABASE_URL: postgres://kitchen:kitchen@kitchen-postgres:5432/kitchen?sslmode=disable
+      KITCHEN_HTTP_ADDR: :8080
+    ports:
+      - "8080:8080"
+    depends_on:
+      kitchen-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/readyz"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  restaurant-demo:
+    build: .
+    command: ["restaurant-demo"]
+    environment:
+      <<: *common-environment
+      RESTAURANT_DATABASE_URL: postgres://restaurant:restaurant@restaurant-postgres:5432/restaurant?sslmode=disable
+      RESTAURANT_HTTP_ADDR: :8081
+      KITCHEN_API_URL: http://kitchen-api:8080
+      DEMO_PARTNER_API_KEY: ${DEMO_PARTNER_API_KEY:-demo-partner-key-change-me}
+    ports:
+      - "8081:8081"
+    depends_on:
+      restaurant-migrate:
+        condition: service_completed_successfully
+      kitchen-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8081/readyz"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  kitchen-worker:
+    build: .
+    command: ["kitchen-worker"]
+    environment:
+      <<: *common-environment
+      KITCHEN_DATABASE_URL: postgres://kitchen:kitchen@kitchen-postgres:5432/kitchen?sslmode=disable
+      WORKER_POLL_INTERVAL: ${WORKER_POLL_INTERVAL:-250ms}
+      WORKER_HTTP_TIMEOUT: ${WORKER_HTTP_TIMEOUT:-2s}
+      WORKER_MAX_ATTEMPTS: ${WORKER_MAX_ATTEMPTS:-5}
+    depends_on:
+      kitchen-migrate:
+        condition: service_completed_successfully
+      restaurant-demo:
+        condition: service_healthy
+
+volumes:
+  kitchen-data:
+  restaurant-data:

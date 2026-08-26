@@ -1,0 +1,7 @@
+package: kitchenapi
+output: kitchenapi/openapi.gen.go
+generate:
+  models: true
+  chi-server: true
+output-options:
+  skip-prune: false

@@ -1,0 +1,1673 @@
+openapi: 3.1.0
+info:
+  title: Авито.Кухня API
+  version: 0.1.0
+  description: |
+    Public API будущего web-клиента и закрытый Partner API заведений.
+
+    `X-User-ID` используется только как MVP-заглушка идентификации и не является
+    механизмом безопасности. Денежные значения передаются целым числом копеек,
+    единственная валюта MVP — RUB.
+servers:
+  - url: http://localhost:8080
+    description: Локальный Docker Compose
+tags:
+  - name: Operations
+    description: Проверки процесса и его зависимостей.
+  - name: Public catalog
+    description: Просмотр заведений и опубликованных меню.
+  - name: Public orders
+    description: Создание и просмотр заказов текущего MVP-пользователя.
+  - name: Partner menu
+    description: Публикация меню аутентифицированным заведением.
+  - name: Partner orders
+    description: Решения и статусы заказов аутентифицированного заведения.
+
+paths:
+  /healthz:
+    get:
+      tags: [Operations]
+      operationId: getHealth
+      summary: Проверить, что процесс работает
+      security: []
+      responses:
+        '200':
+          description: Процесс работает.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: ok
+
+  /readyz:
+    get:
+      tags: [Operations]
+      operationId: getReadiness
+      summary: Проверить готовность обслуживать запросы
+      description: Проверяет обязательные зависимости процесса, включая основную PostgreSQL.
+      security: []
+      responses:
+        '200':
+          description: Процесс и зависимости готовы.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: ready
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/v1/restaurants:
+    get:
+      tags: [Public catalog]
+      operationId: listRestaurants
+      summary: Получить список заведений
+      description: Возвращает заведения в стабильном порядке с cursor-pagination.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Страница заведений.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RestaurantPage'
+              examples:
+                default:
+                  $ref: '#/components/examples/RestaurantList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/restaurants/{restaurantId}:
+    get:
+      tags: [Public catalog]
+      operationId: getRestaurant
+      summary: Получить карточку заведения
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/RestaurantID'
+      responses:
+        '200':
+          description: Карточка заведения.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Restaurant'
+              examples:
+                default:
+                  $ref: '#/components/examples/RestaurantDetails'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/restaurants/{restaurantId}/menu:
+    get:
+      tags: [Public catalog]
+      operationId: getRestaurantMenu
+      summary: Получить опубликованное меню заведения
+      description: Доступность является копией платформы; окончательный остаток проверяет ресторан.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/RestaurantID'
+      responses:
+        '200':
+          description: Текущая опубликованная версия меню.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Menu'
+              examples:
+                default:
+                  $ref: '#/components/examples/PublishedMenu'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/orders:
+    post:
+      tags: [Public orders]
+      operationId: createOrder
+      summary: Создать заказ
+      description: |
+        Сервер проверяет принадлежность позиций одному заведению, актуальные цены и
+        копию доступности, затем сам рассчитывает итог. Заказ, снимки позиций,
+        начальная история и outbox-событие создаются одной транзакцией.
+
+        Первый успешный запрос возвращает `201`. Повтор с тем же `Idempotency-Key`
+        и эквивалентным телом возвращает существующий заказ с `200`. Тот же ключ
+        с другим телом возвращает `409 IDEMPOTENCY_KEY_REUSED`.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOrderRequest'
+            examples:
+              default:
+                $ref: '#/components/examples/CreateOrderRequest'
+      responses:
+        '201':
+          description: Заказ создан.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+            Location:
+              description: URI созданного заказа.
+              schema:
+                type: string
+                example: /api/v1/orders/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
+            Idempotency-Replayed:
+              description: Всегда `false` для впервые созданного заказа.
+              schema:
+                type: boolean
+                example: false
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+              examples:
+                created:
+                  $ref: '#/components/examples/PendingOrder'
+        '200':
+          description: Идемпотентный повтор; возвращён ранее созданный заказ.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+            Idempotency-Replayed:
+              description: Всегда `true` для идемпотентного повтора.
+              schema:
+                type: boolean
+                example: true
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+              examples:
+                replayed:
+                  $ref: '#/components/examples/PendingOrder'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Запрос конфликтует с текущими данными или прежним idempotency key.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                priceChanged:
+                  $ref: '#/components/examples/PriceChangedError'
+                itemUnavailable:
+                  $ref: '#/components/examples/ItemUnavailableError'
+                restaurantClosed:
+                  $ref: '#/components/examples/RestaurantClosedError'
+                idempotencyKeyReused:
+                  $ref: '#/components/examples/IdempotencyKeyReusedError'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '422':
+          description: Синтаксически корректный заказ нарушает правило одного заведения.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                multipleRestaurants:
+                  $ref: '#/components/examples/MultipleRestaurantsError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    get:
+      tags: [Public orders]
+      operationId: listUserOrders
+      summary: Получить заказы пользователя
+      description: Возвращает только заказы `X-User-ID`, от новых к старым.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Страница заказов пользователя.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderPage'
+              examples:
+                default:
+                  $ref: '#/components/examples/UserOrderList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/orders/{orderId}:
+    get:
+      tags: [Public orders]
+      operationId: getUserOrder
+      summary: Получить заказ пользователя
+      description: Чужой заказ маскируется ответом `404 NOT_FOUND`.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/OrderID'
+        - $ref: '#/components/parameters/UserID'
+      responses:
+        '200':
+          description: Заказ со снимками позиций и историей статусов.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+              examples:
+                default:
+                  $ref: '#/components/examples/PendingOrder'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/orders/{orderId}/cancel:
+    post:
+      tags: [Public orders]
+      operationId: cancelUserOrder
+      summary: Отменить заказ пользователя
+      description: |
+        Отмена возможна только из `pending_confirmation`, пока worker не начал
+        передачу ресторану. Статус, история и остановка ожидающего outbox-события
+        фиксируются атомарно.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/OrderID'
+        - $ref: '#/components/parameters/UserID'
+      responses:
+        '200':
+          description: Заказ отменён.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+              examples:
+                cancelled:
+                  $ref: '#/components/examples/CancelledOrder'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Заказ уже передаётся или его статус не допускает отмену.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                notCancellable:
+                  $ref: '#/components/examples/OrderNotCancellableError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /partner/v1/menu:
+    put:
+      tags: [Partner menu]
+      operationId: publishPartnerMenu
+      summary: Опубликовать полную версию меню
+      description: |
+        Заведение определяется Bearer API-ключом. Версия в теле должна быть больше
+        текущей. Точный повтор уже применённой версии с тем же содержимым возвращает
+        прежний результат; старая версия или то же число с другим содержимым дают
+        `409 STALE_MENU_VERSION`.
+      security:
+        - PartnerBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PublishMenuRequest'
+            examples:
+              default:
+                $ref: '#/components/examples/PublishMenuRequest'
+      responses:
+        '200':
+          description: Меню опубликовано или возвращён результат точного повтора.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MenuPublication'
+              examples:
+                default:
+                  $ref: '#/components/examples/MenuPublication'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Версия меню устарела или повторно использована с другим содержимым.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                staleVersion:
+                  $ref: '#/components/examples/StaleMenuVersionError'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /partner/v1/menu/items/{externalItemId}:
+    patch:
+      tags: [Partner menu]
+      operationId: patchPartnerMenuItem
+      summary: Изменить опубликованную позицию меню
+      description: |
+        `expected_version` должна совпасть с текущей версией меню. После успешного
+        изменения платформа атомарно увеличивает версию на один.
+      security:
+        - PartnerBearer: []
+      parameters:
+        - $ref: '#/components/parameters/ExternalItemID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchMenuItemRequest'
+            examples:
+              availability:
+                $ref: '#/components/examples/PatchMenuItemRequest'
+      responses:
+        '200':
+          description: Позиция изменена, версия меню увеличена.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MenuItemMutation'
+              examples:
+                default:
+                  $ref: '#/components/examples/MenuItemMutation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: "`expected_version` не совпадает с текущей версией."
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                staleVersion:
+                  $ref: '#/components/examples/StaleMenuVersionError'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /partner/v1/orders:
+    get:
+      tags: [Partner orders]
+      operationId: listPartnerOrders
+      summary: Получить заказы заведения
+      description: Заведение определяется Bearer API-ключом; сортировка — от новых к старым.
+      security:
+        - PartnerBearer: []
+      parameters:
+        - $ref: '#/components/parameters/OrderStatusFilter'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Страница заказов заведения.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PartnerOrderPage'
+              examples:
+                default:
+                  $ref: '#/components/examples/PartnerOrderList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /partner/v1/orders/{orderId}/decision:
+    post:
+      tags: [Partner orders]
+      operationId: decidePartnerOrder
+      summary: Принять или отклонить ожидающий заказ
+      description: Допустим только переход из `pending_confirmation` в `accepted` или `rejected`.
+      security:
+        - PartnerBearer: []
+      parameters:
+        - $ref: '#/components/parameters/OrderID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrderDecisionRequest'
+            examples:
+              accept:
+                $ref: '#/components/examples/OrderDecisionRequest'
+      responses:
+        '200':
+          description: Решение применено.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PartnerOrder'
+              examples:
+                accepted:
+                  $ref: '#/components/examples/PartnerAcceptedOrder'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Текущий статус не допускает указанное решение.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                invalidTransition:
+                  $ref: '#/components/examples/InvalidStatusTransitionError'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /partner/v1/orders/{orderId}/status:
+    patch:
+      tags: [Partner orders]
+      operationId: updatePartnerOrderStatus
+      summary: Изменить статус принятого заказа
+      description: Разрешены только последовательные переходы после `accepted`.
+      security:
+        - PartnerBearer: []
+      parameters:
+        - $ref: '#/components/parameters/OrderID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrderStatusUpdateRequest'
+            examples:
+              preparing:
+                $ref: '#/components/examples/OrderStatusUpdateRequest'
+      responses:
+        '200':
+          description: Статус и история обновлены атомарно.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PartnerOrder'
+              examples:
+                preparing:
+                  $ref: '#/components/examples/PartnerPreparingOrder'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Текущий статус не допускает переход.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                invalidTransition:
+                  $ref: '#/components/examples/InvalidStatusTransitionError'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    PartnerBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: Partner API key
+      description: Статический высокоэнтропийный ключ; в БД платформы хранится только его хеш.
+
+  headers:
+    XRequestID:
+      description: Идентификатор запроса, также присутствующий в теле ошибки.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        example: req-01J9XYZ7E7T1R6M4B8N3P2Q5S6
+
+  parameters:
+    RestaurantID:
+      name: restaurantId
+      in: path
+      required: true
+      description: Внутренний UUID заведения на платформе.
+      schema:
+        type: string
+        format: uuid
+    OrderID:
+      name: orderId
+      in: path
+      required: true
+      description: Внутренний UUID заказа на платформе.
+      schema:
+        type: string
+        format: uuid
+    ExternalItemID:
+      name: externalItemId
+      in: path
+      required: true
+      description: Идентификатор позиции в системе текущего заведения.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+    UserID:
+      name: X-User-ID
+      in: header
+      required: true
+      description: MVP-заглушка идентификации пользователя; не является аутентификацией.
+      schema:
+        type: string
+        format: uuid
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Уникальный для пользователя ключ намерения создать заказ.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        pattern: '^[A-Za-z0-9._:-]+$'
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Максимальное число элементов страницы.
+      schema:
+        type: integer
+        format: int32
+        minimum: 1
+        maximum: 100
+        default: 20
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: Непрозрачный cursor из предыдущего ответа; нельзя конструировать на клиенте.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 512
+    OrderStatusFilter:
+      name: status
+      in: query
+      required: false
+      description: Фильтр заказов заведения по одному статусу.
+      schema:
+        $ref: '#/components/schemas/OrderStatus'
+
+  responses:
+    BadRequest:
+      description: Запрос не прошёл синтаксическую или структурную валидацию.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: VALIDATION_ERROR
+            message: Поле items должно содержать хотя бы одну позицию.
+            details:
+              field: items
+            request_id: req-01J9XYZ7E7T1R6M4B8N3P2Q5S6
+    Unauthorized:
+      description: Partner API key отсутствует или не прошёл проверку.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: UNAUTHORIZED
+            message: Неверный Partner API key.
+            request_id: req-01J9XYZ7E7T1R6M4B8N3P2Q5S6
+    NotFound:
+      description: Ресурс не найден или не принадлежит текущему пользователю/заведению.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: NOT_FOUND
+            message: Ресурс не найден.
+            request_id: req-01J9XYZ7E7T1R6M4B8N3P2Q5S6
+    PayloadTooLarge:
+      description: Размер JSON-тела превышает серверный лимит.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: VALIDATION_ERROR
+            message: Тело запроса слишком большое.
+            request_id: req-01J9XYZ7E7T1R6M4B8N3P2Q5S6
+    InternalError:
+      description: Неожиданная внутренняя ошибка без раскрытия деталей реализации.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: INTERNAL_ERROR
+            message: Внутренняя ошибка сервиса.
+            request_id: req-01J9XYZ7E7T1R6M4B8N3P2Q5S6
+    ServiceUnavailable:
+      description: Обязательная зависимость процесса временно не готова.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: SERVICE_UNAVAILABLE
+            message: PostgreSQL временно недоступна.
+            request_id: req-01J9XYZ7E7T1R6M4B8N3P2Q5S6
+
+  schemas:
+    Currency:
+      type: string
+      enum: [RUB]
+
+    OrderStatus:
+      type: string
+      enum:
+        - pending_confirmation
+        - accepted
+        - preparing
+        - ready
+        - delivering
+        - delivered
+        - rejected
+        - cancelled
+
+    ErrorCode:
+      type: string
+      enum:
+        - ITEM_UNAVAILABLE
+        - PRICE_CHANGED
+        - MULTIPLE_RESTAURANTS
+        - RESTAURANT_CLOSED
+        - IDEMPOTENCY_KEY_REUSED
+        - INVALID_STATUS_TRANSITION
+        - STALE_MENU_VERSION
+        - ORDER_NOT_CANCELLABLE
+        - VALIDATION_ERROR
+        - UNAUTHORIZED
+        - NOT_FOUND
+        - SERVICE_UNAVAILABLE
+        - INTERNAL_ERROR
+
+    Error:
+      type: object
+      additionalProperties: false
+      required: [code, message, request_id]
+      properties:
+        code:
+          $ref: '#/components/schemas/ErrorCode'
+        message:
+          type: string
+          minLength: 1
+          maxLength: 512
+        details:
+          type: object
+          additionalProperties: true
+        request_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+
+    HealthResponse:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, ready]
+
+    RestaurantSummary:
+      type: object
+      additionalProperties: false
+      required: [id, name, is_accepting_orders]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        description:
+          type: string
+          maxLength: 1000
+        is_accepting_orders:
+          type: boolean
+
+    Restaurant:
+      type: object
+      additionalProperties: false
+      required: [id, name, is_accepting_orders, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        description:
+          type: string
+          maxLength: 1000
+        address:
+          type: string
+          maxLength: 500
+        is_accepting_orders:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    RestaurantPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/RestaurantSummary'
+        next_cursor:
+          type: string
+          minLength: 1
+          maxLength: 512
+
+    MenuItem:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - external_item_id
+        - name
+        - unit_price_minor
+        - currency
+        - available
+      properties:
+        id:
+          type: string
+          format: uuid
+        external_item_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        description:
+          type: string
+          maxLength: 1000
+        unit_price_minor:
+          type: integer
+          format: int64
+          minimum: 1
+        currency:
+          $ref: '#/components/schemas/Currency'
+        available:
+          type: boolean
+
+    Menu:
+      type: object
+      additionalProperties: false
+      required: [restaurant_id, version, currency, published_at, items]
+      properties:
+        restaurant_id:
+          type: string
+          format: uuid
+        version:
+          type: integer
+          format: int64
+          minimum: 1
+        currency:
+          $ref: '#/components/schemas/Currency'
+        published_at:
+          type: string
+          format: date-time
+        items:
+          type: array
+          maxItems: 1000
+          items:
+            $ref: '#/components/schemas/MenuItem'
+
+    CreateOrderItem:
+      type: object
+      additionalProperties: false
+      required: [menu_item_id, quantity, seen_unit_price_minor]
+      properties:
+        menu_item_id:
+          type: string
+          format: uuid
+        quantity:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 100
+        seen_unit_price_minor:
+          type: integer
+          format: int64
+          minimum: 1
+
+    CreateOrderRequest:
+      type: object
+      additionalProperties: false
+      required: [restaurant_id, items]
+      properties:
+        restaurant_id:
+          type: string
+          format: uuid
+        items:
+          type: array
+          minItems: 1
+          maxItems: 100
+          description: Повтор одного `menu_item_id` запрещён; порядок не влияет на request hash.
+          items:
+            $ref: '#/components/schemas/CreateOrderItem'
+
+    OrderItem:
+      type: object
+      additionalProperties: false
+      required:
+        - menu_item_id
+        - external_item_id
+        - name
+        - unit_price_minor
+        - quantity
+        - line_total_minor
+        - currency
+      properties:
+        menu_item_id:
+          type: string
+          format: uuid
+        external_item_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        unit_price_minor:
+          type: integer
+          format: int64
+          minimum: 1
+        quantity:
+          type: integer
+          format: int32
+          minimum: 1
+        line_total_minor:
+          type: integer
+          format: int64
+          minimum: 1
+        currency:
+          $ref: '#/components/schemas/Currency'
+
+    OrderStatusHistoryEntry:
+      type: object
+      additionalProperties: false
+      required: [status, changed_at, actor]
+      properties:
+        status:
+          $ref: '#/components/schemas/OrderStatus'
+        changed_at:
+          type: string
+          format: date-time
+        actor:
+          type: string
+          enum: [platform, restaurant, user]
+        reason:
+          type: string
+          maxLength: 500
+
+    OrderSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - restaurant_id
+        - restaurant_name
+        - status
+        - total_price_minor
+        - currency
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        restaurant_id:
+          type: string
+          format: uuid
+        restaurant_name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        status:
+          $ref: '#/components/schemas/OrderStatus'
+        total_price_minor:
+          type: integer
+          format: int64
+          minimum: 1
+        currency:
+          $ref: '#/components/schemas/Currency'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    Order:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - restaurant_id
+        - restaurant_name
+        - status
+        - total_price_minor
+        - currency
+        - items
+        - status_history
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        restaurant_id:
+          type: string
+          format: uuid
+        restaurant_name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        status:
+          $ref: '#/components/schemas/OrderStatus'
+        total_price_minor:
+          type: integer
+          format: int64
+          minimum: 1
+        currency:
+          $ref: '#/components/schemas/Currency'
+        items:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/OrderItem'
+        status_history:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/OrderStatusHistoryEntry'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    OrderPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/OrderSummary'
+        next_cursor:
+          type: string
+          minLength: 1
+          maxLength: 512
+
+    PublishMenuItem:
+      type: object
+      additionalProperties: false
+      required: [external_item_id, name, unit_price_minor, available]
+      properties:
+        external_item_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        description:
+          type: string
+          maxLength: 1000
+        unit_price_minor:
+          type: integer
+          format: int64
+          minimum: 1
+        available:
+          type: boolean
+
+    PublishMenuRequest:
+      type: object
+      additionalProperties: false
+      required: [version, currency, items]
+      properties:
+        version:
+          type: integer
+          format: int64
+          minimum: 1
+        currency:
+          $ref: '#/components/schemas/Currency'
+        items:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          description: "`external_item_id` не должен повторяться в пределах публикации."
+          items:
+            $ref: '#/components/schemas/PublishMenuItem'
+
+    MenuPublication:
+      type: object
+      additionalProperties: false
+      required: [restaurant_id, version, item_count, published_at]
+      properties:
+        restaurant_id:
+          type: string
+          format: uuid
+        version:
+          type: integer
+          format: int64
+          minimum: 1
+        item_count:
+          type: integer
+          format: int32
+          minimum: 1
+        published_at:
+          type: string
+          format: date-time
+
+    PatchMenuItemRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_version]
+      minProperties: 2
+      properties:
+        expected_version:
+          type: integer
+          format: int64
+          minimum: 1
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        description:
+          type: string
+          maxLength: 1000
+        unit_price_minor:
+          type: integer
+          format: int64
+          minimum: 1
+        available:
+          type: boolean
+
+    MenuItemMutation:
+      type: object
+      additionalProperties: false
+      required: [restaurant_id, menu_version, item]
+      properties:
+        restaurant_id:
+          type: string
+          format: uuid
+        menu_version:
+          type: integer
+          format: int64
+          minimum: 1
+        item:
+          $ref: '#/components/schemas/MenuItem'
+
+    PartnerOrderItem:
+      type: object
+      additionalProperties: false
+      required: [external_item_id, name, unit_price_minor, quantity, line_total_minor, currency]
+      properties:
+        external_item_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        unit_price_minor:
+          type: integer
+          format: int64
+          minimum: 1
+        quantity:
+          type: integer
+          format: int32
+          minimum: 1
+        line_total_minor:
+          type: integer
+          format: int64
+          minimum: 1
+        currency:
+          $ref: '#/components/schemas/Currency'
+
+    PartnerOrder:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - restaurant_id
+        - status
+        - total_price_minor
+        - currency
+        - items
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        restaurant_id:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/OrderStatus'
+        total_price_minor:
+          type: integer
+          format: int64
+          minimum: 1
+        currency:
+          $ref: '#/components/schemas/Currency'
+        items:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/PartnerOrderItem'
+        decision_reason:
+          type: string
+          maxLength: 500
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    PartnerOrderPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/PartnerOrder'
+        next_cursor:
+          type: string
+          minLength: 1
+          maxLength: 512
+
+    OrderDecisionRequest:
+      type: object
+      additionalProperties: false
+      required: [decision]
+      properties:
+        decision:
+          type: string
+          enum: [accepted, rejected]
+        reason:
+          type: string
+          maxLength: 500
+
+    OrderStatusUpdateRequest:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [preparing, ready, delivering, delivered]
+
+  examples:
+    RestaurantList:
+      value:
+        items:
+          - id: 11111111-1111-4111-8111-111111111111
+            name: Demo Bistro
+            description: Обеды и выпечка
+            is_accepting_orders: true
+        next_cursor: eyJuYW1lIjoiRGVtbyBCaXN0cm8ifQ
+
+    RestaurantDetails:
+      value:
+        id: 11111111-1111-4111-8111-111111111111
+        name: Demo Bistro
+        description: Обеды и выпечка
+        address: Москва, ул. Примерная, 1
+        is_accepting_orders: true
+        created_at: '2026-08-26T09:00:00Z'
+        updated_at: '2026-08-26T10:00:00Z'
+
+    PublishedMenu:
+      value:
+        restaurant_id: 11111111-1111-4111-8111-111111111111
+        version: 7
+        currency: RUB
+        published_at: '2026-08-26T10:00:00Z'
+        items:
+          - id: 22222222-2222-4222-8222-222222222222
+            external_item_id: soup-01
+            name: Томатный суп
+            description: С базиликом
+            unit_price_minor: 1250
+            currency: RUB
+            available: true
+          - id: 33333333-3333-4333-8333-333333333333
+            external_item_id: bun-01
+            name: Булочка
+            unit_price_minor: 990
+            currency: RUB
+            available: true
+
+    CreateOrderRequest:
+      value:
+        restaurant_id: 11111111-1111-4111-8111-111111111111
+        items:
+          - menu_item_id: 22222222-2222-4222-8222-222222222222
+            quantity: 2
+            seen_unit_price_minor: 1250
+          - menu_item_id: 33333333-3333-4333-8333-333333333333
+            quantity: 1
+            seen_unit_price_minor: 990
+
+    PendingOrder:
+      value:
+        id: aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
+        restaurant_id: 11111111-1111-4111-8111-111111111111
+        restaurant_name: Demo Bistro
+        status: pending_confirmation
+        total_price_minor: 3490
+        currency: RUB
+        items:
+          - menu_item_id: 22222222-2222-4222-8222-222222222222
+            external_item_id: soup-01
+            name: Томатный суп
+            unit_price_minor: 1250
+            quantity: 2
+            line_total_minor: 2500
+            currency: RUB
+          - menu_item_id: 33333333-3333-4333-8333-333333333333
+            external_item_id: bun-01
+            name: Булочка
+            unit_price_minor: 990
+            quantity: 1
+            line_total_minor: 990
+            currency: RUB
+        status_history:
+          - status: pending_confirmation
+            changed_at: '2026-08-26T10:15:00Z'
+            actor: platform
+        created_at: '2026-08-26T10:15:00Z'
+        updated_at: '2026-08-26T10:15:00Z'
+
+    CancelledOrder:
+      value:
+        id: aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
+        restaurant_id: 11111111-1111-4111-8111-111111111111
+        restaurant_name: Demo Bistro
+        status: cancelled
+        total_price_minor: 3490
+        currency: RUB
+        items:
+          - menu_item_id: 22222222-2222-4222-8222-222222222222
+            external_item_id: soup-01
+            name: Томатный суп
+            unit_price_minor: 1250
+            quantity: 2
+            line_total_minor: 2500
+            currency: RUB
+          - menu_item_id: 33333333-3333-4333-8333-333333333333
+            external_item_id: bun-01
+            name: Булочка
+            unit_price_minor: 990
+            quantity: 1
+            line_total_minor: 990
+            currency: RUB
+        status_history:
+          - status: pending_confirmation
+            changed_at: '2026-08-26T10:15:00Z'
+            actor: platform
+          - status: cancelled
+            changed_at: '2026-08-26T10:15:10Z'
+            actor: user
+        created_at: '2026-08-26T10:15:00Z'
+        updated_at: '2026-08-26T10:15:10Z'
+
+    UserOrderList:
+      value:
+        items:
+          - id: aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
+            restaurant_id: 11111111-1111-4111-8111-111111111111
+            restaurant_name: Demo Bistro
+            status: pending_confirmation
+            total_price_minor: 3490
+            currency: RUB
+            created_at: '2026-08-26T10:15:00Z'
+            updated_at: '2026-08-26T10:15:00Z'
+
+    PublishMenuRequest:
+      value:
+        version: 7
+        currency: RUB
+        items:
+          - external_item_id: soup-01
+            name: Томатный суп
+            description: С базиликом
+            unit_price_minor: 1250
+            available: true
+          - external_item_id: bun-01
+            name: Булочка
+            unit_price_minor: 990
+            available: true
+
+    MenuPublication:
+      value:
+        restaurant_id: 11111111-1111-4111-8111-111111111111
+        version: 7
+        item_count: 2
+        published_at: '2026-08-26T10:00:00Z'
+
+    PatchMenuItemRequest:
+      value:
+        expected_version: 7
+        available: false
+
+    MenuItemMutation:
+      value:
+        restaurant_id: 11111111-1111-4111-8111-111111111111
+        menu_version: 8
+        item:
+          id: 22222222-2222-4222-8222-222222222222
+          external_item_id: soup-01
+          name: Томатный суп
+          description: С базиликом
+          unit_price_minor: 1250
+          currency: RUB
+          available: false
+
+    PartnerOrderList:
+      value:
+        items:
+          - id: aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
+            restaurant_id: 11111111-1111-4111-8111-111111111111
+            status: pending_confirmation
+            total_price_minor: 3490
+            currency: RUB
+            items:
+              - external_item_id: soup-01
+                name: Томатный суп
+                unit_price_minor: 1250
+                quantity: 2
+                line_total_minor: 2500
+                currency: RUB
+              - external_item_id: bun-01
+                name: Булочка
+                unit_price_minor: 990
+                quantity: 1
+                line_total_minor: 990
+                currency: RUB
+            created_at: '2026-08-26T10:15:00Z'
+            updated_at: '2026-08-26T10:15:00Z'
+
+    OrderDecisionRequest:
+      value:
+        decision: accepted
+
+    OrderStatusUpdateRequest:
+      value:
+        status: preparing
+
+    PartnerAcceptedOrder:
+      value:
+        id: aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
+        restaurant_id: 11111111-1111-4111-8111-111111111111
+        status: accepted
+        total_price_minor: 3490
+        currency: RUB
+        items:
+          - external_item_id: soup-01
+            name: Томатный суп
+            unit_price_minor: 1250
+            quantity: 2
+            line_total_minor: 2500
+            currency: RUB
+          - external_item_id: bun-01
+            name: Булочка
+            unit_price_minor: 990
+            quantity: 1
+            line_total_minor: 990
+            currency: RUB
+        created_at: '2026-08-26T10:15:00Z'
+        updated_at: '2026-08-26T10:15:02Z'
+
+    PartnerPreparingOrder:
+      value:
+        id: aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
+        restaurant_id: 11111111-1111-4111-8111-111111111111
+        status: preparing
+        total_price_minor: 3490
+        currency: RUB
+        items:
+          - external_item_id: soup-01
+            name: Томатный суп
+            unit_price_minor: 1250
+            quantity: 2
+            line_total_minor: 2500
+            currency: RUB
+          - external_item_id: bun-01
+            name: Булочка
+            unit_price_minor: 990
+            quantity: 1
+            line_total_minor: 990
+            currency: RUB
+        created_at: '2026-08-26T10:15:00Z'
+        updated_at: '2026-08-26T10:16:00Z'
+
+    PriceChangedError:
+      value:
+        code: PRICE_CHANGED
+        message: Цена одной или нескольких позиций изменилась.
+        details:
+          items:
+            - menu_item_id: 22222222-2222-4222-8222-222222222222
+              seen_unit_price_minor: 1200
+              actual_unit_price_minor: 1250
+        request_id: req-01J9XYZ7E7T1R6M4B8N3P2Q5S6
+
+    ItemUnavailableError:
+      value:
+        code: ITEM_UNAVAILABLE
+        message: Позиция сейчас недоступна.
+        details:
+          menu_item_ids:
+            - 22222222-2222-4222-8222-222222222222
+        request_id: req-01J9XYZ7E7T1R6M4B8N3P2Q5S6
+
+    MultipleRestaurantsError:
+      value:
+        code: MULTIPLE_RESTAURANTS
+        message: Все позиции заказа должны относиться к одному заведению.
+        request_id: req-01J9XYZ7E7T1R6M4B8N3P2Q5S6
+
+    RestaurantClosedError:
+      value:
+        code: RESTAURANT_CLOSED
+        message: Заведение сейчас не принимает заказы.
+        request_id: req-01J9XYZ7E7T1R6M4B8N3P2Q5S6
+
+    IdempotencyKeyReusedError:
+      value:
+        code: IDEMPOTENCY_KEY_REUSED
+        message: Idempotency-Key уже использован с другим телом запроса.
+        request_id: req-01J9XYZ7E7T1R6M4B8N3P2Q5S6
+
+    OrderNotCancellableError:
+      value:
+        code: ORDER_NOT_CANCELLABLE
+        message: Передача заказа ресторану уже началась.
+        details:
+          current_status: pending_confirmation
+        request_id: req-01J9XYZ7E7T1R6M4B8N3P2Q5S6
+
+    StaleMenuVersionError:
+      value:
+        code: STALE_MENU_VERSION
+        message: Версия меню устарела.
+        details:
+          expected_version: 7
+          current_version: 8
+        request_id: req-01J9XYZ7E7T1R6M4B8N3P2Q5S6
+
+    InvalidStatusTransitionError:
+      value:
+        code: INVALID_STATUS_TRANSITION
+        message: Переход статуса запрещён.
+        details:
+          current_status: ready
+          requested_status: preparing
+        request_id: req-01J9XYZ7E7T1R6M4B8N3P2Q5S6

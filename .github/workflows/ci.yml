@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.0'
+          cache: true
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Verify OpenAPI generation
+        run: |
+          go generate ./internal/generated
+          git diff --exit-code -- internal/generated
+
+      - name: Verify diagrams
+        run: |
+          curl -fsSLo /tmp/plantuml.jar https://github.com/plantuml/plantuml/releases/download/v1.2026.7/plantuml-1.2026.7.jar
+          java -jar /tmp/plantuml.jar -checkonly -charset UTF-8 docs/diagrams/*.puml
+          java -jar /tmp/plantuml.jar -tsvg -charset UTF-8 -o generated docs/diagrams/*.puml
+          git diff --exit-code -- docs/diagrams/generated
+
+      - name: Unit, HTTP and PostgreSQL integration tests
+        run: go test ./...
+
+      - name: Race detector
+        run: go test -race -short ./...
+
+      - name: Static analysis
+        run: |
+          go vet ./...
+          go tool golangci-lint run ./...
+          go tool govulncheck ./...
+
+      - name: Compose validation
+        run: docker compose config --quiet
+
+      - name: Clean Compose E2E
+        run: ./tests/e2e.sh

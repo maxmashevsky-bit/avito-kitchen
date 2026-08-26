@@ -1,0 +1,9 @@
+.git
+.github
+.env
+.DS_Store
+bin
+coverage.out
+docs
+tests
+*.md
