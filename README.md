@@ -45,12 +45,12 @@ make e2e
 
 ## Архитектура и владение данными
 
-![C4 Container](docs/diagrams/generated/c4-container.svg)
+![C4 Container](docs/diagrams/generated/c4-container-modern.png)
 
 Основная часть — модульный монолит: API и worker имеют общие use cases, но разные
 entrypoints. Demo-ресторан — отдельный сервис. Прямых SQL-запросов в чужую БД нет.
 
-![ER](docs/diagrams/generated/er.svg)
+![ER](docs/diagrams/generated/er-modern.png)
 
 Платформа владеет заведениями, опубликованной копией меню, заказами, историей и outbox.
 Ресторан владеет остатками, резервами и входящими заказами. `order_items` хранит snapshots,
@@ -61,9 +61,9 @@ entrypoints. Demo-ресторан — отдельный сервис. Прям
 
 ## CJM
 
-![CJM пользователя](docs/diagrams/generated/user-cjm.svg)
+![CJM пользователя](docs/diagrams/generated/user-cjm-modern.png)
 
-![CJM заведения](docs/diagrams/generated/restaurant-cjm.svg)
+![CJM заведения](docs/diagrams/generated/restaurant-cjm-modern.png)
 
 ## API и бизнес-правила
 
@@ -78,7 +78,7 @@ Bearer keys; в Kitchen DB хранится только SHA-256 Partner key.
 Деньги — целые копейки, валюта — `RUB`. Сервер перепроверяет цену и считает итог,
 а ресторан повторно проверяет остаток.
 
-![Order state](docs/diagrams/generated/order-state.svg)
+![Order state](docs/diagrams/generated/order-state-modern.png)
 
 `pending_confirmation → accepted|rejected|cancelled`, затем
 `accepted → preparing → ready → delivering → delivered`. Отмена разрешена только до
